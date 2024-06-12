@@ -1,0 +1,88 @@
+import requests
+from bs4 import BeautifulSoup
+import logging
+from typing import List
+import subprocess
+from tqdm import tqdm
+import os
+from flask import Flask, request, render_template, redirect, url_for
+from concurrent.futures import ThreadPoolExecutor
+
+app = Flask(__name__)
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+HEADERS = {
+    'User-Agent': 'Your User Agent String',
+    'Accept-Language': 'en-US,en;q=0.5',
+}
+
+def get_video_links(base_url: str, class_attr: str) -> List[dict]:
+    video_data = []
+    try:
+        logging.info(f"Sending GET request to URL: {base_url}")
+        response = requests.get(base_url, headers=HEADERS)
+        response.raise_for_status()
+        logging.info("Successfully received response from the server.")
+        soup = BeautifulSoup(response.content, 'html.parser')
+        video_divs = soup.find_all('a', {'class': class_attr})
+        if not video_divs:
+            logging.warning("No video links found on the page.")
+            return video_data
+        for div in video_divs:
+            url = "https://www.pornhub.com" + div.get('href')
+            title = div.get('title')
+            thumbnail = div.find('img').get('src') if div.find('img') else None
+            video_data.append({'url': url, 'title': title, 'thumbnail': thumbnail})
+        logging.info(f"Found {len(video_data)} video links with metadata.")
+    except requests.RequestException as e:
+        logging.error(f"Request failed: {e}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
+    return video_data
+
+
+def extract_video_urls(video_divs) -> List[str]:
+    base_url = "https://www.pornhub.com"
+    video_urls = [
+        base_url + div.get('href')
+        for div in video_divs if div.get('href') and div.get('href').startswith('/view_video.php?viewkey=')
+    ]
+    return video_urls
+
+def download_video(video: dict, output_dir: str):
+    try:
+        link = video['url']
+        title = video['title']
+        command = ['yt-dlp', '--extract-audio', '--audio-format', 'mp3', '-o', os.path.join(output_dir, f'{title}.%(ext)s'), link]
+        subprocess.run(command, check=True)
+        logging.info(f"Successfully downloaded {link}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error downloading {link}: {e}")
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        base_url = request.form['base_url']
+        class_attr = request.form['class_attr']
+        output_dir = request.form['output_dir']
+        
+        if not base_url or not class_attr or not output_dir:
+            logging.error("One or more required fields are missing.")
+            return render_template('index.html', error="All fields are required.")
+        
+        video_data = get_video_links(base_url, class_attr)
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(tqdm(executor.map(lambda video: download_video(video, output_dir), video_data), total=len(video_data), desc='Downloading'))
+        
+        return render_template('index.html', videos=video_data)
+    
+    return render_template('index.html')
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
